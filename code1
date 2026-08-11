@@ -1,120 +1,15 @@
-End-to-End Project Summary: Snowflake Cost & Performance Governance Platform
-1. USE CASE
-This project is a Snowflake FinOps / Cost Governance and Performance Monitoring platform built entirely on Snowflake-native capabilities. It serves two purposes:
+-- Step 1: Train the ML Model on your existing Warehouse Daily view
+CREATE OR REPLACE SNOWFLAKE.ML.FORECAST ECOMMERCE_DEV.COST_ANALYTICS.COST_FORECASTER (
+  INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ECOMMERCE_DEV.COST_ANALYTICS.VW_WAREHOUSE_DAILY'),
+  TIMESTAMP_COLNAME => 'USAGE_DATE',
+  TARGET_COLNAME => 'CREDITS_USED'
+);
 
-E-Commerce Analytics Pipeline (Medallion Architecture) — ingesting, cleansing, and modeling Brazilian e-commerce data through Bronze > Silver > Gold layers using Dynamic Tables.
-Snowflake Account Cost & Performance Dashboard — a Streamlit app that queries Snowflake's own system views (ACCOUNT_USAGE, ORGANIZATION_USAGE, INFORMATION_SCHEMA) to provide real-time FinOps governance.
-2. DATA ARCHITECTURE (Medallion / Lakehouse)
-Database: ECOMMERCE_DEV
-
-Schema	Purpose
-BRONZE_LAYER	Raw tables (*_RAW) loaded via Snowpipe from external stage
-STAGING_SCHEMA	Streams for CDC tracking
-SILVER_LAYER	Cleansed, typed, deduplicated Dynamic Tables
-GOLD_LAYER	Business-level aggregations (DIM_, FACT_, analytics marts)
-DATA_QUALITY	DMF result views, expectations, score cards, reconciliation
-MONITORING	Operational health views (DT refresh, tasks, queries, credits)
-COST_ANALYTICS	FinOps governance views consumed by the Streamlit dashboard
-SCHEMACHANGE	Migration history tracking
-Entities: Customers, Orders, Order Items, Payments, Reviews, Products, Sellers, Geolocation
-
-3. KEY SNOWFLAKE FEATURES USED
-Feature	How It's Used
-Dynamic Tables (TARGET_LAG 1h)	All Silver and Gold transformations — zero-maintenance incremental refresh
-Streams + Tasks	CDC pipeline from Bronze to Silver
-Snowpipe	Auto-ingest from external stage into Bronze
-Cortex TRANSLATE	Portuguese review comments translated to English in Gold layer
-Privacy Tags	PRIVACY_LEVEL, SEMANTIC_CATEGORY on PII columns
-DMFs (Data Metric Functions)	Automated data quality checks with expectations
-Schemachange	Version-controlled migrations (V*.sql = versioned, R*.sql = repeatable)
-SPCS (Container Runtime)	Streamlit app runs on SYSTEM_COMPUTE_POOL_CPU
-ACCOUNT_USAGE views	Foundation for all cost/perf analytics
-4. THE STREAMLIT APPLICATION
-Location: ECOMMERCE_DEV.COST_ANALYTICS.COST_ANALYTICS_DASHBOARD
-Runtime: SPCS (Container Pool)
-16 Tabs:
-
-#	Tab	What It Shows
-1	Overview	7-day spend, monthly projection, MTD USD, weekly/monthly trends
-2	Warehouses	Daily credit usage, utilization %, MoM change, top resources
-3	Users	Per-user cost attribution, expensive query patterns
-4	Serverless	Task credits, Snowpipe, clustering, materialized views, search optimization
-5	Storage	Daily storage growth and trends
-6	Query Performance	Slow queries, queue times, full table scans, spilling
-7	Containers	SPCS compute pool costs, data transfer
-8	Simulator	What-if warehouse sizing (user inputs, calculates projected savings)
-9	Efficiency Score	Waste score per warehouse and per user
-10	Budget Burn-Down	Budget vs actual spend, burn rate tracking
-11	Remediation Console	Actionable ALTER WAREHOUSE / SUSPEND commands with copy-to-clipboard
-12	Cost Velocity	Day-over-day cost acceleration/deceleration
-13	Anomalies	Statistical outlier detection on daily spend
-14	Anti-Patterns	Duplicate queries, failed queries
-15	Concurrency & Sizing	Peak hour analysis, concurrency, sizing recommendations
-16	Identity Governance	Inactive users, login failure patterns
-Key Streamlit features: Role-based access tiers (ADMIN/ENGINEER/VIEWER), Slack/Teams webhook alerting, cached queries (TTL 600s), dynamic chart rendering, custom CSS design system.
-
-5. VIEWS POWERING THE DASHBOARD (COST_ANALYTICS Schema)
-All 38 views are built on top of Snowflake's own system tables — no external data sources needed:
-
-Source Table	Views Built
-WAREHOUSE_METERING_HISTORY	VW_COST_BY_SERVICE, VW_WAREHOUSE_DAILY, VW_WEEKLY_TRENDS, VW_MONTHLY_TRENDS, VW_WAREHOUSE_MOM, VW_COST_FORECAST, VW_BUDGET_BURNDOWN, VW_COST_VELOCITY, VW_COST_ANOMALIES
-QUERY_HISTORY	VW_USER_COSTS, VW_EXPENSIVE_QUERY_PATTERNS, VW_QUERY_PERFORMANCE, VW_QUEUE_TIMES, VW_FULL_TABLE_SCANS, VW_SPILLING_QUERIES, VW_DUPLICATE_QUERIES, VW_FAILED_QUERIES, VW_PEAK_HOURS, VW_CONCURRENCY
-SERVERLESS_TASK_HISTORY	VW_SERVERLESS_TASKS
-PIPE_USAGE_HISTORY	VW_SNOWPIPE_COSTS
-AUTO_CLUSTERING_HISTORY	VW_CLUSTERING_COSTS
-MATERIALIZED_VIEW_REFRESH_HISTORY	VW_MATERIALIZED_VIEW_COSTS
-SEARCH_OPTIMIZATION_HISTORY	VW_SEARCH_OPTIMIZATION_COSTS
-STORAGE_USAGE	VW_STORAGE_DAILY
-METERING_DAILY_HISTORY	VW_CONTAINER_COSTS, VW_DATA_TRANSFER
-LOGIN_HISTORY	VW_LOGIN_HISTORY
-USERS	VW_IDLE_USERS
-Calculated / cross-view	VW_WASTE_SCORE, VW_USER_WASTE_SCORE, VW_COST_SUMMARY_USD, VW_BUDGET_BURN_RATE, VW_WAREHOUSE_UTILIZATION, VW_TOP_RESOURCES, VW_WAREHOUSE_SIZING, VW_WAREHOUSE_SIZING_BASELINE
-6. WHAT HAS BEEN ACHIEVED
-A production-grade medallion data pipeline with automated refresh (Dynamic Tables), CDC (Streams), and auto-ingest (Snowpipe).
-Data governance with privacy tags, DMF-based quality monitoring, cross-layer reconciliation checks, and health scorecards.
-A comprehensive FinOps dashboard with 16 specialized tabs covering cost, performance, waste, anomalies, identity, and remediation — built entirely from Snowflake system metadata.
-Infrastructure-as-code via Schemachange migrations (versioned + repeatable).
-Operational monitoring for Dynamic Table refreshes, task health, and query performance.
-AI-enhanced data (Cortex TRANSLATE for multilingual reviews).
-7. SUGGESTIONS FOR FUTURE ENHANCEMENTS
-A. Leverage More Snowflake System Tables:
-
-Unused Source	Opportunity
-ACCESS_HISTORY	Column-level data access lineage, identify unused tables for cost savings
-DATA_TRANSFER_HISTORY	Cross-region/cloud replication cost tracking
-REPLICATION_USAGE_HISTORY	Replication cost governance
-AUTOMATIC_CLUSTERING_HISTORY (granular)	Cluster key ROI analysis
-COPY_HISTORY	Ingest cost-per-table, failed loads tracking
-POLICY_REFERENCES	Governance coverage reporting
-TAG_REFERENCES	Tag compliance auditing
-OBJECT_DEPENDENCIES	Impact analysis before changes
-B. Architecture Enhancements:
-
-Cortex Analyst + Semantic View — Create a semantic model over the COST_ANALYTICS views so users can ask natural-language cost questions ("What warehouse spent the most last week?").
-Cortex Agent — Build a FinOps Agent that can answer cost questions AND execute remediation actions (suspend idle warehouses, resize, etc.).
-Alerts — Replace manual webhook with CREATE ALERT for automated threshold-based notifications (budget exceeded, anomaly detected, etc.).
-Resource Monitors — Integrate RESOURCE_MONITORS view to show active monitor status and remaining budgets.
-Snowflake Budgets — Use the new Budgets feature (SNOWFLAKE.LOCAL.ACCOUNT_BUDGET) for native budget tracking.
-C. Dashboard Improvements:
-
-Time range selector — Currently hardcoded to 7/30 days; add a sidebar date picker.
-Drill-down navigation — Click a warehouse to see its query breakdown.
-Export to PDF/CSV — Add download buttons for governance reporting.
-Scheduled snapshots — Store daily cost snapshots in a table for true historical trending beyond ACCOUNT_USAGE retention (1 year).
-Multi-account support — Use ORGANIZATION_USAGE views for org-wide FinOps.
-Tagging-based chargeback — Add warehouse/query tags for department-level cost allocation.
-D. Data Pipeline Enhancements:
-
-Cortex Sentiment Analysis — Score review sentiment natively (CORTEX.SENTIMENT).
-Forecasting — Use Cortex ML FORECAST on daily_sales_summary for revenue projections.
-Anomaly Detection — Apply Cortex ANOMALY_DETECTION on order volumes.
-Search Optimization — Add SOS on high-cardinality lookup columns in Gold layer.
-Clustering Keys — Add explicit clustering on FACT_ORDERS (ORDER_PURCHASE_TIMESTAMP) and FACT_ORDER_ITEMS (ORDER_ID).
-8. KEY ARCHITECTURAL INSIGHT
-The entire cost analytics dashboard is built exclusively from Snowflake-provided system tables (ACCOUNT_USAGE, INFORMATION_SCHEMA, LOCAL). No external monitoring tools, no third-party agents — just SQL views on top of Snowflake's own metadata. This means:
-
-Zero additional data ingestion cost
-Always up-to-date (governed by Snowflake's own refresh SLAs)
-No external dependencies to maintain
-Can be replicated to any Snowflake account instantly
-The e-commerce pipeline demonstrates how to combine this operational observability with actual business data processing in a single governed platform.
+-- Step 2: Create a view that dynamically calls the ML model to project 30 days out
+CREATE OR REPLACE VIEW ECOMMERCE_DEV.COST_ANALYTICS.VW_ML_SPEND_FORECAST AS 
+SELECT 
+    TS AS FORECAST_DATE, 
+    FORECAST AS PREDICTED_CREDITS, 
+    LOWER_BOUND AS OPTIMISTIC_SPEND, 
+    UPPER_BOUND AS PESSIMISTIC_SPEND
+FROM TABLE(ECOMMERCE_DEV.COST_ANALYTICS.COST_FORECASTER!FORECAST(FORECASTING_PERIODS => 30));
