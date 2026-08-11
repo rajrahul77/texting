@@ -1,868 +1,120 @@
-include <stdio.h>
-
-# Snowflake Cost & Performance Governance Dashboard
-# Co-authored with CoCo
-import decimal
-import pandas as pd
-import streamlit as st
-
-# --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Snowflake Cost & Performance Governance",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-SCHEMA = "ECOMMERCE_DEV.COST_ANALYTICS"
-
-# --- DESIGN SYSTEM & CSS OVERRIDES ---
-st.markdown("""
-    <style>
-        /* Base layout adjustments */
-        .block-container { 
-            padding-top: 1.5rem; 
-            padding-bottom: 2rem; 
-            max-width: 1400px;
-        }
-        
-        /* Typography */
-        html, body, [class*="css"] {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            color: #1e293b;
-        }
-        
-        /* Minimalist Metric Cards */
-        div[data-testid="stMetric"] {
-            background-color: #ffffff;
-            border: 1px solid #e2e8f0;
-            padding: 12px 16px;
-            border-radius: 6px;
-            box-shadow: none;
-        }
-        div[data-testid="stMetric"] label {
-            font-size: 0.75rem !important;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #64748b !important;
-            font-weight: 600;
-        }
-        div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-            font-size: 1.4rem !important;
-            font-weight: 600;
-            color: #0f172a;
-        }
-
-        /* Tabs Styling */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 4px;
-            border-bottom: 1px solid #e2e8f0;
-        }
-        .stTabs [data-baseweb="tab"] {
-            font-size: 0.8125rem;
-            font-weight: 500;
-            padding: 8px 14px;
-            border-radius: 4px 4px 0 0;
-            background-color: transparent;
-            color: #64748b;
-            border: none;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: #ffffff !important;
-            color: #0f172a !important;
-            font-weight: 600 !important;
-            border-bottom: 2px solid #0284c7 !important;
-        }
-
-        /* Dataframe Styling */
-        .stDataFrame {
-            border: 1px solid #e2e8f0;
-            border-radius: 6px;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-
-# --- SAFE NUMERIC CONVERSION HELPERS ---
-def safe_num(val, default=0.0):
-    """Safely converts any value (Decimal, string, series sum, None) to float."""
-    try:
-        if val is None or pd.isna(val):
-            return default
-        if isinstance(val, (pd.Series, pd.Index)):
-            val = pd.to_numeric(val, errors="coerce").sum()
-        return float(val)
-    except Exception:
-        return default
-
-@st.cache_data(ttl=600)
-def run_query(view_name):
-    try:
-        _conn = st.connection("snowflake")
-        df = _conn.query(f"SELECT * FROM {SCHEMA}.{view_name}")
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        for col in df.columns:
-            try:
-                numeric_series = pd.to_numeric(df[col], errors="coerce")
-                if not numeric_series.isna().all():
-                    df[col] = numeric_series.fillna(0.0)
-                    continue
-            except Exception:
-                pass
-
-            if pd.api.types.is_datetime64_any_dtype(df[col]) or df[col].apply(lambda x: hasattr(x, "strftime")).any():
-                df[col] = df[col].astype(str)
-            elif df[col].dtype == "object":
-                df[col] = df[col].fillna("").astype(str)
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-def get_best_col(df, candidates, default_index=0):
-    """Finds the first existing candidate column in DataFrame or falls back safely."""
-    if df is None or df.empty:
-        return None
-    for col in candidates:
-        if col in df.columns:
-            return col
-    if len(df.columns) > default_index:
-        return df.columns[default_index]
-    return None
-
-def safe_render_chart(chart_type, df, x_candidates, y_candidates, color_candidates=None, multi_y=False):
-    """
-    Renders charts safely by resolving actual columns dynamically.
-    When multi_y is False (default), picks ONLY ONE single best matching Y column to prevent duplicate unit stacking.
-    """
-    if df is None or df.empty:
-        return
-    
-    x_col = get_best_col(df, x_candidates, 0)
-    
-    if isinstance(y_candidates, list):
-        if multi_y:
-            existing_y = [c for c in y_candidates if c in df.columns]
-            y_col = existing_y if len(existing_y) > 1 else (existing_y[0] if existing_y else None)
-        else:
-            # Pick ONLY the top priority matching column (e.g., DISPLAY_COST first)
-            y_col = None
-            for c in y_candidates:
-                if c in df.columns:
-                    y_col = c
-                    break
-            if not y_col:
-                y_col = get_best_col(df, y_candidates, 1 if len(df.columns) > 1 else 0)
-    else:
-        y_col = get_best_col(df, [y_candidates], 1 if len(df.columns) > 1 else 0)
-        
-    color_col = None
-    if color_candidates:
-        color_col = get_best_col(df, color_candidates if isinstance(color_candidates, list) else [color_candidates], None)
-
-    if not x_col or not y_col:
-        st.dataframe(df, hide_index=True, use_container_width=True)
-        return
-
-    try:
-        kwargs = {"x": x_col, "y": y_col}
-        if color_col and color_col in df.columns:
-            kwargs["color"] = color_col
-
-        if chart_type == "line":
-            st.line_chart(df, **kwargs)
-        elif chart_type == "bar":
-            st.bar_chart(df, **kwargs)
-        elif chart_type == "area":
-            st.area_chart(df, **kwargs)
-        elif chart_type == "scatter":
-            st.scatter_chart(df, **kwargs)
-    except Exception:
-        st.dataframe(df, hide_index=True, use_container_width=True)
-
-def get_user_security_context():
-    try:
-        _conn = st.connection("snowflake")
-        roles_df = _conn.query("""
-            SELECT CURRENT_ROLE() AS PRIMARY_ROLE,
-                   ARRAY_AGG(ROLE_NAME) WITHIN GROUP (ORDER BY ROLE_NAME) AS ALL_ROLES
-            FROM TABLE(INFORMATION_SCHEMA.APPLICABLE_ROLES())
-        """)
-        if roles_df is not None and not roles_df.empty:
-            primary = roles_df['PRIMARY_ROLE'].iloc[0]
-            all_roles = str(roles_df['ALL_ROLES'].iloc[0])
-            if 'ACCOUNTADMIN' in all_roles or 'FINOPS_ADMIN' in all_roles:
-                return primary, 'ADMIN'
-            elif 'DATA_ENGINEER' in all_roles or 'SYSADMIN' in all_roles:
-                return primary, 'ENGINEER'
-        return 'PUBLIC', 'VIEWER'
-    except Exception:
-        return 'ANONYMOUS', 'ADMIN'
-
-primary_role, user_tier = get_user_security_context()
-
-
-# --- HEADER & CONTROLS ---
-st.title("Cost & Performance Intelligence")
-st.caption(f"Governance Schema: {SCHEMA} | Role: {primary_role} ({user_tier})")
-
-with st.sidebar:
-    st.markdown("### Controls")
-    if st.button("Refresh Cache", use_container_width=True):
-        run_query.clear()
-        st.rerun()
-        
-    st.markdown("---")
-    st.markdown("### Webhook Notification")
-    webhook_url = st.text_input("Slack / Teams Endpoint", type="password")
-    if st.button("Dispatch Test Alert", use_container_width=True):
-        if webhook_url:
-            try:
-                _conn = st.connection("snowflake")
-                _conn.query(f"CALL {SCHEMA}.SEND_SLACK_FINOPS_ALERT('{webhook_url}', 'FinOps Governance Alert: Threshold Exceeded')")
-                st.sidebar.success("Notification dispatched.")
-            except Exception as ex:
-                st.sidebar.error(f"Dispatch failed: {ex}")
-        else:
-            st.sidebar.warning("Endpoint URL required.")
-
-
-# --- NAVIGATION TABS ---
-(
-    tab_overview,
-    tab_warehouse,
-    tab_users,
-    tab_serverless,
-    tab_storage,
-    tab_perf,
-    tab_containers,
-    tab_simulator,
-    tab_waste,
-    tab_burndown,
-    tab_remediation,
-    tab_velocity,
-    tab_anomalies,
-    tab_antipatterns,
-    tab_concurrency,
-    tab_identity,
-) = st.tabs([
-    "Overview",
-    "Warehouses",
-    "Users",
-    "Serverless",
-    "Storage",
-    "Query Performance",
-    "Containers",
-    "Simulator",
-    "Efficiency Score",
-    "Budget Burn-Down",
-    "Remediation Console",
-    "Cost Velocity",
-    "Anomalies",
-    "Anti-Patterns",
-    "Concurrency & Sizing",
-    "Identity Governance",
-])
-
-
-# ==============================================================================
-# 1. OVERVIEW
-# ==============================================================================
-with tab_overview:
-    st.markdown("### Spend Overview")
-
-    df_service = run_query("VW_COST_BY_SERVICE")
-    df_forecast = run_query("VW_COST_FORECAST")
-    df_usd_summary = run_query("VW_COST_SUMMARY_USD")
-
-    if not df_service.empty:
-        date_col = get_best_col(df_service, ["USAGE_DATE", "START_TIME", "DATE"])
-        credit_col = get_best_col(df_service, ["TOTAL_CREDITS", "CREDITS_USED", "CREDITS"])
-        
-        if date_col and credit_col:
-            max_date = df_service[date_col].max()
-            seven_days_ago = str(pd.Timestamp(max_date) - pd.Timedelta(days=7))[:10]
-            recent = df_service[df_service[date_col] >= seven_days_ago]
-            total_7d = safe_num(recent[credit_col].sum())
-
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("7-Day Spend (Credits)", f"{total_7d:,.2f}")
-            if not df_forecast.empty and "PROJECTED_MONTHLY_CREDITS" in df_forecast.columns:
-                proj = safe_num(df_forecast["PROJECTED_MONTHLY_CREDITS"].iloc[-1])
-                with col2:
-                    st.metric("Projected Monthly (Credits)", f"{proj:,.2f}")
-                if "PROJECTED_MONTHLY_USD" in df_forecast.columns:
-                    proj_usd = safe_num(df_forecast["PROJECTED_MONTHLY_USD"].iloc[-1])
-                    with col3:
-                        st.metric("Projected Monthly USD", f"${proj_usd:,.2f}")
-            if not df_usd_summary.empty and "TOTAL_USD" in df_usd_summary.columns:
-                with col4:
-                    st.metric("Billed Actual MTD", f"${safe_num(df_usd_summary['TOTAL_USD'].sum()):,.2f}")
-
-            st.markdown("#### Daily Cost Decomposition (Credits)")
-            safe_render_chart("area", df_service, ["USAGE_DATE", "START_TIME", "DATE"], [credit_col], ["SERVICE_TYPE", "SERVICE"])
-
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        df_weekly = run_query("VW_WEEKLY_TRENDS")
-        if not df_weekly.empty:
-            st.markdown("#### Weekly Consumption Trends (Credits)")
-            c_col = get_best_col(df_weekly, ["CREDITS_USED", "TOTAL_CREDITS", "CREDITS"])
-            safe_render_chart("line", df_weekly, ["WEEK_START", "USAGE_DATE"], [c_col] if c_col else ["CREDITS_USED"], ["SERVICE_TYPE"])
-    with col_t2:
-        df_monthly = run_query("VW_MONTHLY_TRENDS")
-        if not df_monthly.empty:
-            st.markdown("#### Monthly Aggregated Spend (Credits)")
-            c_col = get_best_col(df_monthly, ["CREDITS_USED", "TOTAL_CREDITS", "CREDITS"])
-            safe_render_chart("bar", df_monthly, ["MONTH_START", "USAGE_DATE"], [c_col] if c_col else ["CREDITS_USED"], ["SERVICE_TYPE"])
-
-
-# ==============================================================================
-# 2. WAREHOUSES
-# ==============================================================================
-with tab_warehouse:
-    st.markdown("### Warehouse Infrastructure Analytics")
-
-    df_wh = run_query("VW_WAREHOUSE_DAILY")
-    if not df_wh.empty:
-        wh_col = get_best_col(df_wh, ["WAREHOUSE_NAME", "NAME"])
-        credit_col = get_best_col(df_wh, ["CREDITS_USED", "TOTAL_CREDITS", "CREDITS"])
-
-        if wh_col:
-            warehouses = sorted(df_wh[wh_col].unique())
-            selected_wh = st.multiselect("Filter Warehouses", warehouses, default=warehouses[:5])
-            filtered = df_wh[df_wh[wh_col].isin(selected_wh)].copy()
-
-            if credit_col:
-                total_credits = safe_num(filtered[credit_col].sum())
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Selected Warehouse Spend (Credits)", f"{total_credits:,.2f}")
-            with col2:
-                st.metric("Selection Count", len(selected_wh))
-
-            st.markdown("#### Daily Warehouse Spend")
-            safe_render_chart("line", filtered, ["USAGE_DATE", "DATE"], [credit_col] if credit_col else ["CREDITS_USED"], [wh_col])
-
-    df_util = run_query("VW_WAREHOUSE_UTILIZATION")
-    if not df_util.empty:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Average Utilization %")
-            wh_col = get_best_col(df_util, ["WAREHOUSE_NAME", "NAME"])
-            u_col = get_best_col(df_util, ["UTILIZATION_PCT", "UTIL_PCT", "AVG_UTILIZATION"])
-            if wh_col and u_col:
-                avg_util = df_util.groupby(wh_col, as_index=False)[u_col].mean().sort_values(u_col, ascending=False)
-                safe_render_chart("bar", avg_util, [wh_col], [u_col])
-        with col2:
-            st.markdown("#### Total Idle Hours Provisioned")
-            idle_col = get_best_col(df_util, ["IDLE_HOURS", "TOTAL_IDLE_HOURS"])
-            if wh_col and idle_col:
-                idle = df_util.groupby(wh_col, as_index=False)[idle_col].sum().sort_values(idle_col, ascending=False)
-                safe_render_chart("bar", idle, [wh_col], [idle_col])
-
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        df_mom = run_query("VW_WAREHOUSE_MOM")
-        if not df_mom.empty:
-            st.markdown("#### Month-over-Month Delta")
-            sort_c = get_best_col(df_mom, ["CHANGE", "MOM_CHANGE", "CREDITS_CHANGE"])
-            st.dataframe(df_mom.sort_values(sort_c, ascending=False) if sort_c else df_mom, hide_index=True, use_container_width=True)
-    with col_m2:
-        df_top = run_query("VW_TOP_RESOURCES")
-        if not df_top.empty:
-            st.markdown("#### Top Resource Consumption")
-            sort_c = get_best_col(df_top, ["TOTAL_CREDITS", "CREDITS"])
-            st.dataframe(df_top.sort_values(sort_c, ascending=False) if sort_c else df_top, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 3. USERS
-# ==============================================================================
-with tab_users:
-    st.markdown("### User Spend Attribution")
-
-    df_users = run_query("VW_USER_COSTS")
-    if not df_users.empty:
-        u_col = get_best_col(df_users, ["USER_NAME", "USER"])
-        c_col = get_best_col(df_users, ["TOTAL_CREDITS", "CREDITS_USED", "CREDITS"])
-
-        if u_col and c_col:
-            top_users_df = df_users.groupby(u_col, as_index=False)[c_col].sum().sort_values(c_col, ascending=False)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total User-Attributed Spend (Credits)", f"{safe_num(top_users_df[c_col].sum()):,.2f}")
-            with col2:
-                st.metric("Active Spender Count", len(top_users_df))
-
-            st.markdown("#### Top 15 Account Spenders")
-            safe_render_chart("bar", top_users_df.head(15), [u_col], [c_col])
-
-            user_list = top_users_df[u_col].tolist()
-            user_filter = st.multiselect("Drill-down Users", user_list, default=user_list[:3])
-            if user_filter:
-                user_daily = df_users[df_users[u_col].isin(user_filter)].copy()
-                st.markdown("#### Daily Spender Trajectory")
-                safe_render_chart("line", user_daily, ["USAGE_DATE", "DATE"], [c_col], [u_col])
-
-    df_exp = run_query("VW_EXPENSIVE_QUERY_PATTERNS")
-    if not df_exp.empty:
-        st.markdown("#### Expensive Query Execution Patterns")
-        if user_tier == "VIEWER":
-            st.caption("SQL query text redacted for VIEWER tier.")
-        sort_c = get_best_col(df_exp, ["TOTAL_CREDITS", "CREDITS", "EXECUTION_COUNT"])
-        st.dataframe(df_exp.nlargest(20, sort_c) if sort_c else df_exp, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 4. SERVERLESS
-# ==============================================================================
-with tab_serverless:
-    st.markdown("### Serverless Feature Consumption")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### Top Serverless Tasks")
-        df_tasks = run_query("VW_SERVERLESS_TASKS")
-        if not df_tasks.empty:
-            t_col = get_best_col(df_tasks, ["TASK_NAME", "NAME"])
-            c_col = get_best_col(df_tasks, ["TOTAL_CREDITS", "CREDITS"])
-            if t_col and c_col:
-                task_totals = df_tasks.groupby(t_col, as_index=False)[c_col].sum().sort_values(c_col, ascending=False)
-                safe_render_chart("bar", task_totals.head(10), [t_col], [c_col])
-
-    with col2:
-        st.markdown("#### Snowpipe Ingestion Costs")
-        df_pipe = run_query("VW_SNOWPIPE_COSTS")
-        if not df_pipe.empty:
-            p_col = get_best_col(df_pipe, ["PIPE_NAME", "NAME"])
-            c_col = get_best_col(df_pipe, ["TOTAL_CREDITS", "CREDITS"])
-            if p_col and c_col:
-                pipe_totals = df_pipe.groupby(p_col, as_index=False)[c_col].sum().sort_values(c_col, ascending=False)
-                safe_render_chart("bar", pipe_totals.head(10), [p_col], [c_col])
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown("#### Automatic Clustering")
-        df_clust = run_query("VW_CLUSTERING_COSTS")
-        if not df_clust.empty:
-            st.dataframe(df_clust.head(10), hide_index=True, use_container_width=True)
-    with col4:
-        st.markdown("#### Materialized View Maintenance")
-        df_mv = run_query("VW_MATERIALIZED_VIEW_COSTS")
-        if not df_mv.empty:
-            st.dataframe(df_mv.head(10), hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### Search Optimization Service (SOS) Efficiency")
-    df_sos = run_query("VW_SEARCH_OPTIMIZATION_COSTS")
-    if not df_sos.empty:
-        st.dataframe(df_sos, hide_index=True, use_container_width=True)
-    else:
-        st.caption("No Search Optimization Service spend detected.")
-
-
-# ==============================================================================
-# 5. STORAGE
-# ==============================================================================
-with tab_storage:
-    st.markdown("### Storage Analytics")
-
-    df_storage = run_query("VW_STORAGE_DAILY")
-    if not df_storage.empty:
-        d_col = get_best_col(df_storage, ["USAGE_DATE", "DATE"])
-        gb_col = get_best_col(df_storage, ["TOTAL_GB", "STORAGE_GB", "GB"])
-        db_col = get_best_col(df_storage, ["DATABASE_NAME", "NAME"])
-
-        if d_col and gb_col:
-            max_storage_date = df_storage[d_col].max()
-            latest = df_storage[df_storage[d_col] == max_storage_date]
-            total_gb = safe_num(latest[gb_col].sum())
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Provisioned Storage", f"{total_gb:,.1f} GB ({total_gb/1024:.2f} TB)")
-            with col2:
-                st.metric("Tracked Database Count", latest[db_col].nunique() if db_col else len(latest))
-
-            st.markdown("#### Storage Volume Over Time")
-            if db_col:
-                top_dbs = df_storage.groupby(db_col)[gb_col].max().nlargest(10).index.tolist()
-                filtered_s = df_storage[df_storage[db_col].isin(top_dbs)]
-                safe_render_chart("area", filtered_s, [d_col], [gb_col], [db_col])
-            else:
-                safe_render_chart("area", df_storage, [d_col], [gb_col])
-
-            st.markdown("#### Database Storage Breakdown")
-            st.dataframe(latest.sort_values(gb_col, ascending=False), hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 6. QUERY PERFORMANCE
-# ==============================================================================
-with tab_perf:
-    st.markdown("### Query Performance & Bottlenecks")
-
-    df_perf = run_query("VW_QUERY_PERFORMANCE")
-    if not df_perf.empty:
-        q_date = get_best_col(df_perf, ["QUERY_DATE", "USAGE_DATE", "DATE"])
-        q_tot = get_best_col(df_perf, ["TOTAL_QUERIES", "QUERY_COUNT"])
-        q_fail = get_best_col(df_perf, ["FAILED_QUERIES", "FAILURES"])
-        q_spill = get_best_col(df_perf, ["TOTAL_GB_SPILLED", "SPILLED_GB"])
-
-        if q_date and q_tot:
-            totals = df_perf.groupby(q_date, as_index=False).agg({
-                col: "sum" for col in [q_tot, q_fail, q_spill] if col and col in df_perf.columns
-            })
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Query Volume", f"{safe_num(totals[q_tot].sum()):,.0f}")
-            with col2:
-                if q_fail in totals: st.metric("Failed Query Volume", f"{safe_num(totals[q_fail].sum()):,.0f}")
-            with col3:
-                if q_spill in totals: st.metric("Disk Spilling Volume", f"{safe_num(totals[q_spill].sum()):,.1f} GB")
-
-            st.markdown("#### Daily Query Execution Volume")
-            safe_render_chart("line", totals, [q_date], [q_tot])
-
-    df_queue = run_query("VW_QUEUE_TIMES")
-    if not df_queue.empty:
-        st.markdown("#### Queue Latency by Warehouse")
-        st.dataframe(df_queue, hide_index=True, use_container_width=True)
-
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        df_scans = run_query("VW_FULL_TABLE_SCANS")
-        if not df_scans.empty:
-            st.markdown(f"#### Full Table Scans ({len(df_scans)} queries)")
-            st.dataframe(df_scans.head(15), hide_index=True, use_container_width=True)
-    with col_s2:
-        df_spill = run_query("VW_SPILLING_QUERIES")
-        if not df_spill.empty:
-            st.markdown(f"#### Queries Spilling to Disk ({len(df_spill)} queries)")
-            st.dataframe(df_spill.head(15), hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 7. CONTAINERS (SPCS)
-# ==============================================================================
-with tab_containers:
-    st.markdown("### Snowpark Container Services (SPCS)")
-
-    df_cont = run_query("VW_CONTAINER_COSTS")
-    if not df_cont.empty:
-        cp_col = get_best_col(df_cont, ["COMPUTE_POOL_NAME", "POOL_NAME", "NAME"])
-        c_col = get_best_col(df_cont, ["TOTAL_CREDITS", "CREDITS"])
-
-        if cp_col and c_col:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Container Spend (Credits)", f"{safe_num(df_cont[c_col].sum()):,.2f}")
-            with col2:
-                st.metric("Active Compute Pools", df_cont[cp_col].nunique())
-
-            st.markdown("#### Compute Pool Daily Spend")
-            safe_render_chart("line", df_cont, ["USAGE_DATE", "DATE"], [c_col], [cp_col])
-    else:
-        st.caption("No Container Service compute pool usage detected.")
-
-    df_transfer = run_query("VW_DATA_TRANSFER")
-    if not df_transfer.empty:
-        st.markdown("#### Data Transfer & Egress")
-        st.dataframe(df_transfer, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 8. SIMULATOR
-# ==============================================================================
-with tab_simulator:
-    st.markdown("### Warehouse Sizing Simulator")
-
-    df_sizing = run_query("VW_WAREHOUSE_SIZING_BASELINE")
-    if not df_sizing.empty:
-        wh_col = get_best_col(df_sizing, ["WAREHOUSE_NAME", "NAME"])
-        if wh_col:
-            SIZE_CREDITS = {
-                "X-Small": 1, "Small": 2, "Medium": 4, "Large": 8,
-                "X-Large": 16, "2X-Large": 32, "3X-Large": 64, "4X-Large": 128
-            }
-            SIZE_LIST = list(SIZE_CREDITS.keys())
-
-            selected_wh_sim = st.selectbox("Select Target Warehouse", df_sizing[wh_col].unique())
-            wh_row = df_sizing[df_sizing[wh_col] == selected_wh_sim].iloc[0]
-            
-            current_size = str(wh_row.get("WAREHOUSE_SIZE", "X-Small")).upper()
-            clean_size = "X-Small"
-            for s in SIZE_LIST:
-                if s.upper().replace("-", "") in current_size.replace("-", ""):
-                    clean_size = s
-
-            col_s1, col_s2, col_s3 = st.columns(3)
-            with col_s1:
-                new_size = st.select_slider("Simulated Size", options=SIZE_LIST, value=clean_size)
-            with col_s2:
-                new_auto_suspend = st.slider("Auto-Suspend Timeout (s)", 0, 600, 60, step=30)
-            with col_s3:
-                growth_pct = st.slider("Query Volume Adjustment %", -50, 200, 0, step=10)
-
-            current_credits_hr = SIZE_CREDITS.get(clean_size, 1)
-            new_credits_hr = SIZE_CREDITS.get(new_size, 1)
-            daily_active_hrs = safe_num(wh_row.get("CREDITS_PER_DAY", 0)) / current_credits_hr if current_credits_hr > 0 else 0
-
-            current_monthly = safe_num(wh_row.get("CREDITS_PER_DAY", 0)) * 30
-            new_daily = daily_active_hrs * new_credits_hr * (1 + growth_pct / 100)
-            new_monthly = new_daily * 30
-            savings = current_monthly - new_monthly
-
-            col_r1, col_r2, col_r3 = st.columns(3)
-            with col_r1:
-                st.metric("Baseline Monthly (Credits)", f"{current_monthly:,.2f}")
-            with col_r2:
-                st.metric("Simulated Monthly (Credits)", f"{new_monthly:,.2f}")
-            with col_r3:
-                st.metric("Projected Monthly Savings (Credits)", f"{savings:,.2f}")
-
-            if savings > 0:
-                st.success(f"Resizing {selected_wh_sim} to {new_size} could save ~{savings:,.1f} credits/month.")
-
-
-# ==============================================================================
-# 9. EFFICIENCY SCORE
-# ==============================================================================
-with tab_waste:
-    st.markdown("### Efficiency Scorecard")
-
-    df_waste = run_query("VW_WASTE_SCORE")
-    if not df_waste.empty:
-        s_col = get_best_col(df_waste, ["EFFICIENCY_SCORE", "SCORE"])
-        if s_col:
-            avg_score = safe_num(df_waste[s_col].mean())
-            col_w1, col_w2 = st.columns(2)
-            with col_w1:
-                st.metric("Overall Infrastructure Efficiency Score", f"{avg_score:.0f} / 100")
-            with col_w2:
-                st.progress(min(100, max(0, int(avg_score))) / 100)
-
-        st.markdown("#### Warehouse Efficiency Matrix")
-        st.dataframe(df_waste, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("#### User Execution Efficiency")
-    df_user_waste = run_query("VW_USER_WASTE_SCORE")
-    if not df_user_waste.empty:
-        st.dataframe(df_user_waste, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 10. BUDGET BURN-DOWN
-# ==============================================================================
-with tab_burndown:
-    st.markdown("### Budget Burn-Down & Allocation")
-
-    monthly_budget = st.number_input("Monthly Allocation Target (Credits)", min_value=10, max_value=100000, value=1000, step=100)
-
-    df_burn = run_query("VW_BUDGET_BURNDOWN")
-    df_rate = run_query("VW_BUDGET_BURN_RATE")
-
-    if not df_burn.empty:
-        mtd_col = get_best_col(df_burn, ["MTD_CREDITS", "MTD_SPEND"])
-        if mtd_col:
-            latest = df_burn.iloc[-1]
-            mtd = safe_num(latest[mtd_col])
-            avg_rate = safe_num(latest.get("AVG_DAILY_RATE", 1.0))
-            budget_remaining = monthly_budget - mtd
-            days_of_runway = int(budget_remaining / avg_rate) if avg_rate > 0 else 999
-
-            col_b1, col_b2, col_b3 = st.columns(3)
-            with col_b1:
-                st.metric("MTD Consumption (Credits)", f"{mtd:,.2f}")
-            with col_b2:
-                st.metric("Allocation Remaining (Credits)", f"{budget_remaining:,.2f}")
-            with col_b3:
-                st.metric("Projected Runway", f"{days_of_runway} Days")
-
-            df_burn["BUDGET_CEILING"] = monthly_budget
-            st.markdown("#### Cumulative Spend vs Allocation Ceiling")
-            safe_render_chart("line", df_burn, ["USAGE_DATE", "DATE"], [mtd_col, "BUDGET_CEILING"], multi_y=True)
-
-    if not df_rate.empty:
-        st.markdown("#### Hourly Consumption Velocity")
-        st.dataframe(df_rate, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 11. REMEDIATION CONSOLE
-# ==============================================================================
-with tab_remediation:
-    st.markdown("### Remediation & Action Console")
-
-    if user_tier == "VIEWER":
-        st.caption("Active operations restricted to DATA_ENGINEER and FINOPS_ADMIN roles.")
-
-    _conn = st.connection("snowflake")
-
-    st.markdown("#### Active Warehouse State Controls")
-    try:
-        df_wh_status = _conn.query("SHOW WAREHOUSES")
-        if df_wh_status is not None and not df_wh_status.empty:
-            for _, wh in df_wh_status.iterrows():
-                wh_name = wh.get("name", "")
-                wh_state = wh.get("state", "")
-                
-                col_a, col_b = st.columns([4, 1])
-                with col_a:
-                    st.write(f"Warehouse **{wh_name}** | State: `{wh_state}`")
-                with col_b:
-                    if wh_state == "STARTED" and user_tier != "VIEWER":
-                        if st.button("Suspend", key=f"sus_{wh_name}"):
-                            _conn.query(f"ALTER WAREHOUSE {wh_name} SUSPEND")
-                            st.success(f"Suspended {wh_name}")
-                            st.rerun()
-                    elif wh_state == "SUSPENDED" and user_tier != "VIEWER":
-                        if st.button("Resume", key=f"res_{wh_name}"):
-                            _conn.query(f"ALTER WAREHOUSE {wh_name} RESUME")
-                            st.success(f"Resumed {wh_name}")
-                            st.rerun()
-    except Exception as ex:
-        st.error(f"Error querying active infrastructure state: {ex}")
-
-    st.markdown("---")
-    st.markdown("#### Resource Recommendations")
-    st.caption("Use the Efficiency Score and Simulator tabs to identify optimization targets.")
-
-
-# ==============================================================================
-# 12. COST VELOCITY
-# ==============================================================================
-with tab_velocity:
-    st.markdown("### Cost Velocity & Acceleration")
-
-    df_vel = run_query("VW_COST_VELOCITY")
-    if not df_vel.empty:
-        drift_col = get_best_col(df_vel, ["DRIFT_STATUS", "STATUS"])
-        svc_col = get_best_col(df_vel, ["SERVICE_TYPE", "SERVICE"])
-        
-        if drift_col:
-            spikes = df_vel[df_vel[drift_col] == "SPIKE"]
-            accelerating = df_vel[df_vel[drift_col] == "ACCELERATING"]
-
-            col_v1, col_v2 = st.columns(2)
-            with col_v1:
-                st.metric("Cost Spike Incidents", len(spikes))
-            with col_v2:
-                st.metric("Accelerating Service Count", accelerating[svc_col].nunique() if svc_col else len(accelerating))
-
-        st.markdown("#### Daily Consumption Trajectory")
-        safe_render_chart("line", df_vel, ["USAGE_DATE", "DATE"], ["DAILY_CREDITS", "CREDITS"], [svc_col])
-
-
-# ==============================================================================
-# 13. ANOMALIES (Includes VW_COST_ANOMALIES & VW_COST_SUMMARY_USD)
-# ==============================================================================
-with tab_anomalies:
-    st.markdown("### Cost Anomaly Intelligence")
-
-    df_anom = run_query("VW_COST_ANOMALIES")
-    df_usd = run_query("VW_COST_SUMMARY_USD")
-
-    if not df_anom.empty:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Detected Anomalous Events", len(df_anom))
-        with col2:
-            var_col = get_best_col(df_anom, ["UNEXPECTED_COST_USD", "VAR_USD", "SPEND_USD", "DAILY_CREDITS"])
-            if var_col:
-                st.metric("Total Anomaly Variance Impact", f"${safe_num(df_anom[var_col].sum()):,.2f}")
-
-        st.markdown("#### Anomalous Spend Events")
-        x_anom = ["USAGE_DATE", "START_TIME", "DATE"]
-        y_anom = ["DAILY_CREDITS", "Z_SCORE", "SPEND_USD", "UNEXPECTED_COST_USD"]
-        color_anom = ["ANOMALY_FLAG", "SEVERITY", "WAREHOUSE_NAME"]
-        
-        safe_render_chart("scatter", df_anom, x_anom, y_anom, color_anom)
-
-        st.markdown("#### Anomaly Detail Log")
-        st.dataframe(df_anom, hide_index=True, use_container_width=True)
-    else:
-        st.caption("No statistical cost anomalies detected in the analysis window.")
-
-
-# ==============================================================================
-# 14. ANTI-PATTERNS
-# ==============================================================================
-with tab_antipatterns:
-    st.markdown("### Query Execution Anti-Patterns")
-
-    col_ap1, col_ap2 = st.columns(2)
-    with col_ap1:
-        st.markdown("#### Duplicate Query Signatures")
-        df_dups = run_query("VW_DUPLICATE_QUERIES")
-        if not df_dups.empty:
-            st.dataframe(df_dups, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No duplicate query signatures detected.")
-
-    with col_ap2:
-        st.markdown("#### Failed Query Executions")
-        df_failed = run_query("VW_FAILED_QUERIES")
-        if not df_failed.empty:
-            st.dataframe(df_failed, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No high-cost query failures recorded.")
-
-
-# ==============================================================================
-# 15. CONCURRENCY & SIZING
-# ==============================================================================
-with tab_concurrency:
-    st.markdown("### Concurrency & Rightsizing")
-
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        st.markdown("#### Peak Hours Analysis")
-        df_peaks = run_query("VW_PEAK_HOURS")
-        if not df_peaks.empty:
-            st.dataframe(df_peaks, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No peak hour data available.")
-
-    with col_c2:
-        st.markdown("#### Warehouse Concurrency")
-        df_conc = run_query("VW_CONCURRENCY")
-        if not df_conc.empty:
-            st.dataframe(df_conc, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No concurrency data detected.")
-
-    st.markdown("---")
-    st.markdown("#### Sizing Recommendations")
-    df_wh_sizing = run_query("VW_WAREHOUSE_SIZING")
-    if not df_wh_sizing.empty:
-        st.dataframe(df_wh_sizing, hide_index=True, use_container_width=True)
-
-
-# ==============================================================================
-# 16. IDENTITY GOVERNANCE
-# ==============================================================================
-with tab_identity:
-    st.markdown("### Identity & Access Governance")
-
-    col_id1, col_id2 = st.columns(2)
-    with col_id1:
-        st.markdown("#### Inactive Users (>30 Days)")
-        df_idle = run_query("VW_IDLE_USERS")
-        if not df_idle.empty:
-            st.dataframe(df_idle, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No inactive users detected.")
-
-    with col_id2:
-        st.markdown("#### Authentication Failures & Patterns")
-        df_logins = run_query("VW_LOGIN_HISTORY")
-        if not df_logins.empty:
-            st.dataframe(df_logins, hide_index=True, use_container_width=True)
-        else:
-            st.caption("No recent login failures recorded.")
+End-to-End Project Summary: Snowflake Cost & Performance Governance Platform
+1. USE CASE
+This project is a Snowflake FinOps / Cost Governance and Performance Monitoring platform built entirely on Snowflake-native capabilities. It serves two purposes:
+
+E-Commerce Analytics Pipeline (Medallion Architecture) — ingesting, cleansing, and modeling Brazilian e-commerce data through Bronze > Silver > Gold layers using Dynamic Tables.
+Snowflake Account Cost & Performance Dashboard — a Streamlit app that queries Snowflake's own system views (ACCOUNT_USAGE, ORGANIZATION_USAGE, INFORMATION_SCHEMA) to provide real-time FinOps governance.
+2. DATA ARCHITECTURE (Medallion / Lakehouse)
+Database: ECOMMERCE_DEV
+
+Schema	Purpose
+BRONZE_LAYER	Raw tables (*_RAW) loaded via Snowpipe from external stage
+STAGING_SCHEMA	Streams for CDC tracking
+SILVER_LAYER	Cleansed, typed, deduplicated Dynamic Tables
+GOLD_LAYER	Business-level aggregations (DIM_, FACT_, analytics marts)
+DATA_QUALITY	DMF result views, expectations, score cards, reconciliation
+MONITORING	Operational health views (DT refresh, tasks, queries, credits)
+COST_ANALYTICS	FinOps governance views consumed by the Streamlit dashboard
+SCHEMACHANGE	Migration history tracking
+Entities: Customers, Orders, Order Items, Payments, Reviews, Products, Sellers, Geolocation
+
+3. KEY SNOWFLAKE FEATURES USED
+Feature	How It's Used
+Dynamic Tables (TARGET_LAG 1h)	All Silver and Gold transformations — zero-maintenance incremental refresh
+Streams + Tasks	CDC pipeline from Bronze to Silver
+Snowpipe	Auto-ingest from external stage into Bronze
+Cortex TRANSLATE	Portuguese review comments translated to English in Gold layer
+Privacy Tags	PRIVACY_LEVEL, SEMANTIC_CATEGORY on PII columns
+DMFs (Data Metric Functions)	Automated data quality checks with expectations
+Schemachange	Version-controlled migrations (V*.sql = versioned, R*.sql = repeatable)
+SPCS (Container Runtime)	Streamlit app runs on SYSTEM_COMPUTE_POOL_CPU
+ACCOUNT_USAGE views	Foundation for all cost/perf analytics
+4. THE STREAMLIT APPLICATION
+Location: ECOMMERCE_DEV.COST_ANALYTICS.COST_ANALYTICS_DASHBOARD
+Runtime: SPCS (Container Pool)
+16 Tabs:
+
+#	Tab	What It Shows
+1	Overview	7-day spend, monthly projection, MTD USD, weekly/monthly trends
+2	Warehouses	Daily credit usage, utilization %, MoM change, top resources
+3	Users	Per-user cost attribution, expensive query patterns
+4	Serverless	Task credits, Snowpipe, clustering, materialized views, search optimization
+5	Storage	Daily storage growth and trends
+6	Query Performance	Slow queries, queue times, full table scans, spilling
+7	Containers	SPCS compute pool costs, data transfer
+8	Simulator	What-if warehouse sizing (user inputs, calculates projected savings)
+9	Efficiency Score	Waste score per warehouse and per user
+10	Budget Burn-Down	Budget vs actual spend, burn rate tracking
+11	Remediation Console	Actionable ALTER WAREHOUSE / SUSPEND commands with copy-to-clipboard
+12	Cost Velocity	Day-over-day cost acceleration/deceleration
+13	Anomalies	Statistical outlier detection on daily spend
+14	Anti-Patterns	Duplicate queries, failed queries
+15	Concurrency & Sizing	Peak hour analysis, concurrency, sizing recommendations
+16	Identity Governance	Inactive users, login failure patterns
+Key Streamlit features: Role-based access tiers (ADMIN/ENGINEER/VIEWER), Slack/Teams webhook alerting, cached queries (TTL 600s), dynamic chart rendering, custom CSS design system.
+
+5. VIEWS POWERING THE DASHBOARD (COST_ANALYTICS Schema)
+All 38 views are built on top of Snowflake's own system tables — no external data sources needed:
+
+Source Table	Views Built
+WAREHOUSE_METERING_HISTORY	VW_COST_BY_SERVICE, VW_WAREHOUSE_DAILY, VW_WEEKLY_TRENDS, VW_MONTHLY_TRENDS, VW_WAREHOUSE_MOM, VW_COST_FORECAST, VW_BUDGET_BURNDOWN, VW_COST_VELOCITY, VW_COST_ANOMALIES
+QUERY_HISTORY	VW_USER_COSTS, VW_EXPENSIVE_QUERY_PATTERNS, VW_QUERY_PERFORMANCE, VW_QUEUE_TIMES, VW_FULL_TABLE_SCANS, VW_SPILLING_QUERIES, VW_DUPLICATE_QUERIES, VW_FAILED_QUERIES, VW_PEAK_HOURS, VW_CONCURRENCY
+SERVERLESS_TASK_HISTORY	VW_SERVERLESS_TASKS
+PIPE_USAGE_HISTORY	VW_SNOWPIPE_COSTS
+AUTO_CLUSTERING_HISTORY	VW_CLUSTERING_COSTS
+MATERIALIZED_VIEW_REFRESH_HISTORY	VW_MATERIALIZED_VIEW_COSTS
+SEARCH_OPTIMIZATION_HISTORY	VW_SEARCH_OPTIMIZATION_COSTS
+STORAGE_USAGE	VW_STORAGE_DAILY
+METERING_DAILY_HISTORY	VW_CONTAINER_COSTS, VW_DATA_TRANSFER
+LOGIN_HISTORY	VW_LOGIN_HISTORY
+USERS	VW_IDLE_USERS
+Calculated / cross-view	VW_WASTE_SCORE, VW_USER_WASTE_SCORE, VW_COST_SUMMARY_USD, VW_BUDGET_BURN_RATE, VW_WAREHOUSE_UTILIZATION, VW_TOP_RESOURCES, VW_WAREHOUSE_SIZING, VW_WAREHOUSE_SIZING_BASELINE
+6. WHAT HAS BEEN ACHIEVED
+A production-grade medallion data pipeline with automated refresh (Dynamic Tables), CDC (Streams), and auto-ingest (Snowpipe).
+Data governance with privacy tags, DMF-based quality monitoring, cross-layer reconciliation checks, and health scorecards.
+A comprehensive FinOps dashboard with 16 specialized tabs covering cost, performance, waste, anomalies, identity, and remediation — built entirely from Snowflake system metadata.
+Infrastructure-as-code via Schemachange migrations (versioned + repeatable).
+Operational monitoring for Dynamic Table refreshes, task health, and query performance.
+AI-enhanced data (Cortex TRANSLATE for multilingual reviews).
+7. SUGGESTIONS FOR FUTURE ENHANCEMENTS
+A. Leverage More Snowflake System Tables:
+
+Unused Source	Opportunity
+ACCESS_HISTORY	Column-level data access lineage, identify unused tables for cost savings
+DATA_TRANSFER_HISTORY	Cross-region/cloud replication cost tracking
+REPLICATION_USAGE_HISTORY	Replication cost governance
+AUTOMATIC_CLUSTERING_HISTORY (granular)	Cluster key ROI analysis
+COPY_HISTORY	Ingest cost-per-table, failed loads tracking
+POLICY_REFERENCES	Governance coverage reporting
+TAG_REFERENCES	Tag compliance auditing
+OBJECT_DEPENDENCIES	Impact analysis before changes
+B. Architecture Enhancements:
+
+Cortex Analyst + Semantic View — Create a semantic model over the COST_ANALYTICS views so users can ask natural-language cost questions ("What warehouse spent the most last week?").
+Cortex Agent — Build a FinOps Agent that can answer cost questions AND execute remediation actions (suspend idle warehouses, resize, etc.).
+Alerts — Replace manual webhook with CREATE ALERT for automated threshold-based notifications (budget exceeded, anomaly detected, etc.).
+Resource Monitors — Integrate RESOURCE_MONITORS view to show active monitor status and remaining budgets.
+Snowflake Budgets — Use the new Budgets feature (SNOWFLAKE.LOCAL.ACCOUNT_BUDGET) for native budget tracking.
+C. Dashboard Improvements:
+
+Time range selector — Currently hardcoded to 7/30 days; add a sidebar date picker.
+Drill-down navigation — Click a warehouse to see its query breakdown.
+Export to PDF/CSV — Add download buttons for governance reporting.
+Scheduled snapshots — Store daily cost snapshots in a table for true historical trending beyond ACCOUNT_USAGE retention (1 year).
+Multi-account support — Use ORGANIZATION_USAGE views for org-wide FinOps.
+Tagging-based chargeback — Add warehouse/query tags for department-level cost allocation.
+D. Data Pipeline Enhancements:
+
+Cortex Sentiment Analysis — Score review sentiment natively (CORTEX.SENTIMENT).
+Forecasting — Use Cortex ML FORECAST on daily_sales_summary for revenue projections.
+Anomaly Detection — Apply Cortex ANOMALY_DETECTION on order volumes.
+Search Optimization — Add SOS on high-cardinality lookup columns in Gold layer.
+Clustering Keys — Add explicit clustering on FACT_ORDERS (ORDER_PURCHASE_TIMESTAMP) and FACT_ORDER_ITEMS (ORDER_ID).
+8. KEY ARCHITECTURAL INSIGHT
+The entire cost analytics dashboard is built exclusively from Snowflake-provided system tables (ACCOUNT_USAGE, INFORMATION_SCHEMA, LOCAL). No external monitoring tools, no third-party agents — just SQL views on top of Snowflake's own metadata. This means:
+
+Zero additional data ingestion cost
+Always up-to-date (governed by Snowflake's own refresh SLAs)
+No external dependencies to maintain
+Can be replicated to any Snowflake account instantly
+The e-commerce pipeline demonstrates how to combine this operational observability with actual business data processing in a single governed platform.
