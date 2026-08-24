@@ -1,0 +1,189 @@
+{
+  "manifest_version": "1.0",
+  "target_database": "ECOMMERCE_DB",
+  "target_schema": "VIEWS",
+  "default_source_schema": "VIEWS",
+  "data_products": [
+    {
+      "data_product": "REVENUE_ANALYTICS",
+      "views": [
+        {
+          "name": "AGG_MONTHLY_REVENUE",
+          "enabled": true,
+          "generation_mode": "METADATA",
+          "comment": "Monthly revenue aggregation for trend analysis",
+          "sources": [
+            {
+              "execution_order": 100,
+              "sequence_number": 1,
+              "source_view": "FACT_ORDERS",
+              "source_alias": "f",
+              "join_type": null,
+              "join_condition": null
+            }
+          ],
+          "columns": [
+            {
+              "execution_order": 200,
+              "sequence_number": 1,
+              "output_name": "ORDER_MONTH",
+              "source_column": null,
+              "expression_override": "DATE_TRUNC('MONTH', f.ORDER_DATE)"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 2,
+              "output_name": "TOTAL_ORDERS",
+              "source_column": "f.ORDER_ID",
+              "aggregate_function": "COUNT"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 3,
+              "output_name": "TOTAL_REVENUE",
+              "source_column": "f.TOTAL_REVENUE",
+              "aggregate_function": "SUM",
+              "transform_function": "ROUND",
+              "transform_parameter": "2"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 4,
+              "output_name": "AVG_ORDER_VALUE",
+              "source_column": "f.TOTAL_REVENUE",
+              "aggregate_function": "AVG",
+              "transform_function": "ROUND",
+              "transform_parameter": "2"
+            }
+          ],
+          "where_condition": "f.ORDER_STATUS = 'delivered'",
+          "group_by_columns": ["DATE_TRUNC('MONTH', f.ORDER_DATE)"],
+          "having_condition": null
+        },
+        {
+          "name": "AGG_REVENUE_BY_CATEGORY",
+          "enabled": true,
+          "generation_mode": "METADATA",
+          "comment": "Revenue breakdown by product category",
+          "sources": [
+            {
+              "execution_order": 100,
+              "sequence_number": 1,
+              "source_view": "FACT_ORDER_ITEMS",
+              "source_alias": "fi",
+              "join_type": null,
+              "join_condition": null
+            }
+          ],
+          "columns": [
+            {
+              "execution_order": 200,
+              "sequence_number": 1,
+              "output_name": "PRODUCT_CATEGORY",
+              "source_column": "fi.PRODUCT_CATEGORY",
+              "default_value": "'unknown'"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 2,
+              "output_name": "TOTAL_ORDERS",
+              "source_column": "fi.ORDER_ID",
+              "aggregate_function": "COUNT_DISTINCT"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 3,
+              "output_name": "TOTAL_REVENUE",
+              "source_column": "fi.PRICE",
+              "aggregate_function": "SUM",
+              "transform_function": "ROUND",
+              "transform_parameter": "2"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 4,
+              "output_name": "AVG_PRICE",
+              "source_column": "fi.PRICE",
+              "aggregate_function": "AVG",
+              "transform_function": "ROUND",
+              "transform_parameter": "2"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 5,
+              "output_name": "SELLER_COUNT",
+              "source_column": "fi.SELLER_ID",
+              "aggregate_function": "COUNT_DISTINCT"
+            }
+          ],
+          "where_condition": "fi.ORDER_STATUS = 'delivered'",
+          "group_by_columns": ["COALESCE(fi.PRODUCT_CATEGORY, 'unknown')"],
+          "having_condition": null
+        }
+      ]
+    },
+    {
+      "data_product": "DELIVERY_ANALYTICS",
+      "views": [
+        {
+          "name": "AGG_DELIVERY_BY_STATE",
+          "enabled": true,
+          "generation_mode": "METADATA",
+          "comment": "Delivery performance metrics by customer state",
+          "sources": [
+            {
+              "execution_order": 100,
+              "sequence_number": 1,
+              "source_view": "FACT_ORDERS",
+              "source_alias": "f",
+              "join_type": null,
+              "join_condition": null
+            },
+            {
+              "execution_order": 100,
+              "sequence_number": 2,
+              "source_view": "DIM_CUSTOMERS",
+              "source_alias": "c",
+              "join_type": "INNER",
+              "join_condition": "f.CUSTOMER_ID = c.CUSTOMER_ID"
+            }
+          ],
+          "columns": [
+            {
+              "execution_order": 200,
+              "sequence_number": 1,
+              "output_name": "CUSTOMER_STATE",
+              "source_column": "c.CUSTOMER_STATE"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 2,
+              "output_name": "TOTAL_ORDERS",
+              "source_column": "f.ORDER_ID",
+              "aggregate_function": "COUNT_DISTINCT"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 3,
+              "output_name": "TOTAL_REVENUE",
+              "source_column": "f.TOTAL_REVENUE",
+              "aggregate_function": "SUM",
+              "transform_function": "ROUND",
+              "transform_parameter": "2"
+            },
+            {
+              "execution_order": 200,
+              "sequence_number": 4,
+              "output_name": "UNIQUE_CUSTOMERS",
+              "source_column": "c.CUSTOMER_UNIQUE_ID",
+              "aggregate_function": "COUNT_DISTINCT"
+            }
+          ],
+          "where_condition": "f.ORDER_STATUS = 'delivered'",
+          "group_by_columns": ["c.CUSTOMER_STATE"],
+          "having_condition": null
+        }
+      ]
+    }
+  ]
+}
